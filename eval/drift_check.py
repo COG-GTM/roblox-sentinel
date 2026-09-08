@@ -19,6 +19,8 @@ HELD_OUT_SCAM = [
     "fr33 r0bux in bio",
     "beaming site in my status",
     "ill give u korblox for ur acc",
+    # Sentry ROBLOX-GAME-9 (moderator-labelled scam, scored 0 before fix).
+    "hey i'm a dev, drop your login deets",
 ]
 
 # Message quoted verbatim in the triggering alert (Sentry issue since deleted).
