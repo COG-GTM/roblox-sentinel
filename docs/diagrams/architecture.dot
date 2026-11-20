@@ -1,0 +1,61 @@
+// Sentinel architecture: library modules, scoring data flow, and the COG-GTM drift-check eval.
+// Edit this file, then run docs/diagrams/render.sh to regenerate architecture.png and architecture.svg.
+digraph sentinel {
+  graph [rankdir=TB, fontname="DejaVu Sans", fontsize=18, labelloc=t, nodesep=0.5, ranksep=0.6,
+         label="Sentinel 2.0 architecture (COG-GTM/roblox-sentinel, main)", pad=0.3];
+  node  [shape=box, style="rounded,filled", fillcolor=white, fontname="DejaVu Sans", fontsize=16, margin="0.2,0.1"];
+  edge  [fontname="DejaVu Sans", fontsize=13, color="#555555"];
+
+  // Inputs
+  subgraph cluster_inputs {
+    label="Inputs"; style="rounded,dashed"; color="#888888"; fontsize=16;
+    texts    [label="Example texts\npositive (rare class) / negative (common class)", fillcolor="#fff4d6"];
+    saved    [label="Saved index directory\n(local path or s3://)\nsentinel_local_index_config.json\nembeddings.safetensors + corpus.json", fillcolor="#fff4d6"];
+    obs      [label="Observations from one source\n(e.g. a user's recent messages)", fillcolor="#fff4d6"];
+    {rank=same; texts; saved; obs}
+  }
+
+  // Library
+  subgraph cluster_lib {
+    label="sentinel library (src/sentinel)"; style="rounded"; color="#3b6ea5"; fontsize=16;
+
+    sbert    [label="embeddings/sbert.py\nget_sentence_transformer_and_scaling_fn\n(model cache, E5 scale_fn)", fillcolor="#e3eefa"];
+    io       [label="io/index_io.py + saved_index_config.py\nsave_index / load_index / load_corpus\n(smart_open, safetensors)", fillcolor="#e3eefa"];
+    index    [label="sentinel_local_index.py\nSentinelLocalIndex\nfrom_texts · load · save · subsample", fillcolor="#cfe0f5"];
+    affinity [label="calculate_rare_class_affinity\nencode → semantic_search top_k (+/−)\n→ per-observation score → aggregate", fillcolor="#cfe0f5"];
+    formulae [label="score_formulae.py\ncalculate_contrastive_score, contrastive_components\nskewness · mean_of_positives · top_k_mean\npercentile_score · softmax_weighted_mean · max_score", fillcolor="#e3eefa"];
+    result   [label="score_types.py\nRareClassAffinityResult\nscore · observation_scores · explanations", fillcolor="#e3eefa"];
+    sim      [label="simulation.py\nencode_observations · score_groups\nevaluate_groups · compare_aggregators · run_grid_search", fillcolor="#e3eefa"];
+    {rank=same; sbert; io}
+    {rank=same; formulae; sim}
+  }
+
+  // COG-GTM eval
+  subgraph cluster_eval {
+    label="COG-GTM drift-check eval (eval/)"; style="rounded"; color="#2e8b57"; fontsize=16;
+    exemplars [label="eval/exemplars/\nscam.txt (positives) · benign.txt (negatives)", fillcolor="#e2f4e8"];
+    drift     [label="eval/drift_check.py\nleak check → from_texts(all-MiniLM-L6-v2, seed=0)\n→ score held-out scam / alert / benign + indexed benign", fillcolor="#e2f4e8"];
+    report    [label="stdout report\nper-message score, log_ratio, top-3 neighbours\nsummary: recall and false positives", fillcolor="#e2f4e8"];
+  }
+
+  hf [label="Hugging Face Hub\n(sentence-transformers model download)", shape=cylinder, fillcolor="#f0f0f0"];
+
+  texts    -> index    [label="from_texts()"];
+  saved    -> io       [label="load()"];
+  io       -> index    [label="config, embeddings, corpus"];
+  index    -> io       [label="save()", style=dashed];
+  hf       -> sbert    [style=dashed];
+  sbert    -> index    [label="model + scale_fn"];
+  obs      -> affinity;
+  index    -> affinity [label="positive / negative\nembeddings + corpus"];
+  affinity -> formulae [label="similarities", dir=both, arrowtail=none];
+  affinity -> result;
+  sim      -> index    [label="subsample() per sweep cell", style=dashed];
+  sim      -> affinity [label="cached sample_embeddings"];
+
+  exemplars -> drift;
+  drift     -> index  [label="from_texts()"];
+  drift     -> affinity [label="explain=True\nprevent_exact_match for indexed benign"];
+  result    -> drift  [label="scores + neighbours", style=dashed];
+  drift     -> report;
+}

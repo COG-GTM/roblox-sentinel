@@ -29,6 +29,9 @@ time you wanted to try something different. 2.0 closes that loop:
 
 Full detail and migration notes: [V2_FEATURES.md](V2_FEATURES.md).
 
+How the code fits together, including the COG-GTM drift-check eval: [docs/architecture.md](docs/architecture.md)
+(diagram: [PNG](docs/diagrams/architecture.png), [SVG](docs/diagrams/architecture.svg), editable [Graphviz source](docs/diagrams/architecture.dot)).
+
 ### Aggregation options and explainability
 
 Sentinel includes multiple aggregation strategies and built‑in explainability to help you tune for your use case and understand why a score was assigned.
