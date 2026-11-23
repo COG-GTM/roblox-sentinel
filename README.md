@@ -363,7 +363,7 @@ Notes:
 
 Which aggregator and hyperparameters work best depends on your data, so it helps to measure them on labeled examples. The `sentinel.simulation` module is a small, numpy‑only harness for exactly that — no Ray, S3, or experiment trackers required.
 
-The snippet below also uses `pandas` to show the results as tables, which `pip install '.[sbert]'` does not install: run `pip install '.[sbert]' pandas` (or `poetry install --with examples`).
+The snippet below also uses `pandas` to show the results as tables, which `pip install '.[sbert]'` does not install: run `pip install '.[sbert]' pandas` (or `poetry install --with examples --extras=sbert`; `--with examples` alone leaves out `sentence-transformers`, which `import sentinel` needs).
 
 Give it groups of observations with known labels (`1` = rare/positive source, `0` = common/negative source), score them once, then compare every aggregator (and hyperparameter) cheaply:
 
@@ -498,9 +498,8 @@ file existed simply lack it and continue to load normally.
 ## Examples
 To run the notebook examples
 ```bash
-# Install with examples dependencies
-poetry install --with examples
-poetry install --extras=sbert
+# Install with examples dependencies and the sbert extra
+poetry install --with examples --extras=sbert
 poetry run jupyter notebook
 ```
 
