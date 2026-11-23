@@ -53,7 +53,18 @@ In Sentinel's codebase:
 
 ## Installation
 
-Sentinel needs Python 3.10 or newer. From the repository root:
+Sentinel needs Python 3.10 or newer. The example index (`examples/hate_speech_model`) and example
+data are stored with [Git LFS](https://git-lfs.com), so install it before cloning, or run
+`git lfs pull` in an existing clone. Without it those files are small pointer files and the
+examples fail to load the index.
+
+```bash
+git lfs install
+git clone https://github.com/COG-GTM/roblox-sentinel.git
+cd roblox-sentinel
+```
+
+From the repository root:
 
 ```bash
 pip install .
@@ -124,14 +135,17 @@ This runs `examples/beginner_demo.py`, which builds a tiny in-memory index and
 scores a batch of example messages. On the first run it downloads the
 `all-MiniLM-L6-v2` embedding model, so give it a moment.
 
-To avoid re-downloading that model on every run, mount a local folder as the
-model cache. Create the folder first: if it does not exist, Docker creates it
-owned by root and the container's non-root user cannot write the model into it.
+To avoid re-downloading that model on every run, keep the model cache in a
+named Docker volume. Docker creates the volume owned by the container's
+non-root `sentinel` user, so the model can be written to it:
 
 ```bash
-mkdir -p .hf-cache
-docker run --rm -v "$(pwd)/.hf-cache:/home/sentinel/.cache/huggingface" sentinel
+docker run --rm -v sentinel-hf-cache:/home/sentinel/.cache/huggingface sentinel
 ```
+
+A host folder (`-v "$(pwd)/.hf-cache:..."`) also works, but only if it is
+writable by UID 1000 (the container's `sentinel` user). A missing folder is
+created by Docker as root and the download fails with `PermissionError`.
 
 ### 3. Run your own script
 
@@ -310,7 +324,7 @@ embedding rows, so explanations stay truthful.
 ## Testing for optimal Thresholds and data ratio's
 
 Usage of the `examples/Example_Threshold_Script.py` script will allow for quick threshold checks for a variety of ratios, by default these are 10:1, 5:1, 4:1, 3:1, 2:1 and 1:1 ratios. This has predefined example chat logs, and should, show optimal settings for the dataset being used based on an average score and average detection count.
-You will be able to get detailed information output in the ratios with the -r or --review flags, or only the per-user scores with --results-only.
+You will be able to get detailed information output in the ratios with the -r or --review flags, or a compact view with --results-only (a one-line summary per ratio and threshold plus the per-user scores).
 
 The script loads its index from `./hate_speech_model`, so run it from inside `examples/` (with the `sbert` extra installed):
 
@@ -348,6 +362,8 @@ Notes:
 ## Simulation-based tuning
 
 Which aggregator and hyperparameters work best depends on your data, so it helps to measure them on labeled examples. The `sentinel.simulation` module is a small, numpy‑only harness for exactly that — no Ray, S3, or experiment trackers required.
+
+The snippet below also uses `pandas` to show the results as tables, which `pip install '.[sbert]'` does not install: run `pip install '.[sbert]' pandas` (or `poetry install --with examples`).
 
 Give it groups of observations with known labels (`1` = rare/positive source, `0` = common/negative source), score them once, then compare every aggregator (and hyperparameter) cheaply:
 
