@@ -53,12 +53,15 @@ In Sentinel's codebase:
 
 ## Installation
 
+Sentinel needs Python 3.10 or newer. From the repository root:
+
 ```bash
 pip install .
 ```
 
-By default `sentinel` doesn't pull in all transitive dependencies, specifically avoiding pulling in sentence transformers and its dependencies (torch).
-To pull them in as well, use:
+This installs the core library, including `torch` and `transformers` (both are required dependencies).
+It does not install `sentence-transformers`, which `sentinel.sentinel_local_index` imports, so every
+example in this README (and in `examples/`) needs the `sbert` extra. To pull it in as well, use:
 
 ```bash
 pip install '.[sbert]'
@@ -122,9 +125,11 @@ scores a batch of example messages. On the first run it downloads the
 `all-MiniLM-L6-v2` embedding model, so give it a moment.
 
 To avoid re-downloading that model on every run, mount a local folder as the
-model cache:
+model cache. Create the folder first: if it does not exist, Docker creates it
+owned by root and the container's non-root user cannot write the model into it.
 
 ```bash
+mkdir -p .hf-cache
 docker run --rm -v "$(pwd)/.hf-cache:/home/sentinel/.cache/huggingface" sentinel
 ```
 
@@ -134,8 +139,11 @@ The default command is just a starting point. Override it to run any other
 script in the image — for example the threshold tuning script:
 
 ```bash
-docker run --rm sentinel python examples/Example_Threshold_Script.py
+docker run --rm -w /app/examples sentinel python Example_Threshold_Script.py
 ```
+
+The threshold script loads its index from `./hate_speech_model`, so it must run
+from inside `examples/` (`-w /app/examples`).
 
 Or drop into an interactive shell to explore:
 
@@ -151,6 +159,10 @@ docker run --rm -v "$(pwd):/app" sentinel python your_script.py
 ```
 
 ## Quick Start
+
+Requires the `sbert` extra (see [Installation](#installation)). `path/to/local/index` is a
+placeholder: to try this without building your own index, use the example index shipped in
+`examples/hate_speech_model` (run from the repository root).
 
 ```python
 from sentinel.sentinel_local_index import SentinelLocalIndex
@@ -297,8 +309,15 @@ embedding rows, so explanations stay truthful.
 
 ## Testing for optimal Thresholds and data ratio's
 
-Usage of the 'examples\Example_Threshold_Script.py' script will allow for quick threshold checks for a variety of ratios, by default these are 10:1, 5:1 and 1:1 ratios. This has predefined example chat logs, and should, show optimal settings for the dataset being used based on an average score and average detection count.
-You will be able to get detailed information output in the ratios with the -r or --review flags.
+Usage of the `examples/Example_Threshold_Script.py` script will allow for quick threshold checks for a variety of ratios, by default these are 10:1, 5:1, 4:1, 3:1, 2:1 and 1:1 ratios. This has predefined example chat logs, and should, show optimal settings for the dataset being used based on an average score and average detection count.
+You will be able to get detailed information output in the ratios with the -r or --review flags, or only the per-user scores with --results-only.
+
+The script loads its index from `./hate_speech_model`, so run it from inside `examples/` (with the `sbert` extra installed):
+
+```bash
+cd examples
+python Example_Threshold_Script.py --results-only
+```
 
 ## Choosing an aggregation strategy
 
