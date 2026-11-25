@@ -230,6 +230,10 @@ def _take_rows(
     return selected, [corpus[i] for i in indices.tolist()]
 
 
+# semantic_search's default corpus_chunk_size.
+_MAX_CACHED_CORPUS_ROWS = 500_000
+
+
 def _cos_sim_with_unit_corpus(
     query: torch.Tensor, unit_corpus: torch.Tensor
 ) -> torch.Tensor:
@@ -757,7 +761,10 @@ class SentinelLocalIndex:
             and cached[1] == embeddings._version
         ):
             return cached[2]
-        unit = normalize_embeddings(embeddings)
+        # Cache a regular tensor even when first called under inference mode, so later
+        # autograd-tracked scoring can still use it.
+        with torch.inference_mode(False):
+            unit = normalize_embeddings(embeddings)
         # Only the positive and negative embeddings are live; drop replaced tensors.
         if key not in cache and len(cache) >= 2:
             cache.clear()
@@ -774,13 +781,17 @@ class SentinelLocalIndex:
         """Run ``semantic_search`` with cosine similarity against an index corpus.
 
         Falls back to plain ``semantic_search`` where a cached normalised corpus could
-        not match it: non-tensor or 1-D corpora, inference tensors (no version counter)
-        and CUDA autocast (which changes the dtype ``cos_sim`` normalises in).
+        not match it: non-tensor or 1-D corpora, inference tensors (no version counter),
+        corpora that require grad, CUDA autocast (which changes the dtype ``cos_sim``
+        normalises in), and corpora larger than one ``semantic_search`` chunk, which it
+        normalises a chunk at a time instead of holding a full normalised copy.
         """
         if (
             not isinstance(corpus_embeddings, torch.Tensor)
             or corpus_embeddings.dim() != 2
+            or corpus_embeddings.shape[0] > _MAX_CACHED_CORPUS_ROWS
             or corpus_embeddings.is_inference()
+            or corpus_embeddings.requires_grad
             or torch.is_autocast_enabled()
         ):
             return semantic_search(sample_embeddings, corpus_embeddings, top_k=top_k)

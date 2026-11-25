@@ -931,3 +931,44 @@ class TestNormalizedCorpusCache:
             queries, vector, top_k=1
         )
         assert not index.__dict__.get("_unit_embeddings_cache")
+
+    def test_inference_mode_warmup_caches_regular_tensor(self) -> None:
+        """A cache filled under inference mode still works with autograd-tracked queries."""
+        from sentence_transformers.util import semantic_search
+
+        index, rng = self._index()
+        queries = torch.tensor(rng.normal(size=(4, 16)), dtype=torch.float32)
+        with torch.inference_mode():
+            index._search(queries, index.positive_embeddings, 3)
+        tracked = queries.clone().requires_grad_()
+        assert index._search(tracked, index.positive_embeddings, 3) == semantic_search(
+            tracked, index.positive_embeddings, top_k=3
+        )
+
+    def test_autocast_bypasses_warm_cache(self) -> None:
+        """Under autocast scoring goes through plain ``semantic_search``."""
+        import sentinel.sentinel_local_index as sli
+
+        index, rng = self._index()
+        queries = rng.normal(size=(5, 16)).astype(np.float32)
+        index._search(queries, index.positive_embeddings, 3)
+        with patch.object(
+            sli.torch, "is_autocast_enabled", return_value=True
+        ), patch.object(
+            sli, "semantic_search", wraps=sli.semantic_search
+        ) as spy, patch.object(
+            index, "_unit_embeddings"
+        ) as unit:
+            index._search(queries, index.positive_embeddings, 3)
+        unit.assert_not_called()
+        assert "score_function" not in spy.call_args.kwargs
+
+    def test_large_corpus_is_not_cached(self) -> None:
+        """Corpora over one ``semantic_search`` chunk are normalised chunk by chunk."""
+        import sentinel.sentinel_local_index as sli
+
+        index, rng = self._index()
+        queries = rng.normal(size=(2, 16)).astype(np.float32)
+        with patch.object(sli, "_MAX_CACHED_CORPUS_ROWS", 10):
+            index._search(queries, index.positive_embeddings, 3)
+        assert not index.__dict__.get("_unit_embeddings_cache")
