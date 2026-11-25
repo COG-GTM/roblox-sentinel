@@ -18,6 +18,7 @@ import tempfile
 import pytest
 import torch
 import numpy as np
+from unittest.mock import MagicMock, patch
 
 from sentinel.sentinel_local_index import SentinelLocalIndex
 from sentinel.score_types import RareClassAffinityResult
@@ -834,3 +835,72 @@ class TestSubsample:
         index = SentinelLocalIndex(sentence_model=None)
         with pytest.raises(ValueError, match="without both positive and negative"):
             index.subsample(n_positive=1)
+
+
+class TestNormalizedCorpusCache:
+    """The index corpus is normalised once, and scores match plain cosine similarity."""
+
+    def _index(self, dim=16, n_positive=30, n_negative=120):
+        rng = np.random.default_rng(7)
+        model = MagicMock()
+        return (
+            SentinelLocalIndex(
+                sentence_model=model,
+                positive_embeddings=torch.tensor(
+                    rng.normal(size=(n_positive, dim)), dtype=torch.float32
+                ),
+                negative_embeddings=torch.tensor(
+                    rng.normal(size=(n_negative, dim)), dtype=torch.float32
+                ),
+            ),
+            rng,
+        )
+
+    def test_matches_semantic_search_cos_sim(self):
+        from sentence_transformers.util import semantic_search
+
+        index, rng = self._index()
+        queries = rng.normal(size=(25, 16)).astype(np.float32)
+        for corpus in (index.positive_embeddings, index.negative_embeddings):
+            assert index._search(queries, corpus, 7) == semantic_search(
+                queries, corpus, top_k=7
+            )
+
+    def test_corpus_normalised_once_across_calls(self):
+        import sentinel.sentinel_local_index as sli
+
+        index, rng = self._index()
+        texts = [f"t{i}" for i in range(10)]
+        embeddings = rng.normal(size=(10, 16)).astype(np.float32)
+        index.calculate_rare_class_affinity(texts, sample_embeddings=embeddings)
+        real = sli.normalize_embeddings
+        with patch.object(sli, "normalize_embeddings", side_effect=real) as spy:
+            first = index.calculate_rare_class_affinity(
+                texts, sample_embeddings=embeddings
+            )
+            second = index.calculate_rare_class_affinity(
+                texts, sample_embeddings=embeddings
+            )
+        # Two searches per call, each normalising only the query chunk.
+        assert spy.call_count == 4
+        assert all(call.args[0].shape[0] == 10 for call in spy.call_args_list)
+        assert first.observation_scores == second.observation_scores
+
+    def test_cache_follows_reassigned_and_mutated_embeddings(self):
+        from sentence_transformers.util import semantic_search
+
+        index, rng = self._index()
+        queries = rng.normal(size=(5, 16)).astype(np.float32)
+        index._search(queries, index.positive_embeddings, 3)
+
+        index.positive_embeddings = torch.tensor(
+            rng.normal(size=(30, 16)), dtype=torch.float32
+        )
+        assert index._search(queries, index.positive_embeddings, 3) == semantic_search(
+            queries, index.positive_embeddings, top_k=3
+        )
+
+        index.positive_embeddings.mul_(-1.0)
+        assert index._search(queries, index.positive_embeddings, 3) == semantic_search(
+            queries, index.positive_embeddings, top_k=3
+        )
