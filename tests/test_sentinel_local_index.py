@@ -15,6 +15,9 @@
 """Tests for SentinelLocalIndex class."""
 
 import tempfile
+from typing import Tuple
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 import numpy as np
@@ -834,3 +837,156 @@ class TestSubsample:
         index = SentinelLocalIndex(sentence_model=None)
         with pytest.raises(ValueError, match="without both positive and negative"):
             index.subsample(n_positive=1)
+
+
+class TestNormalizedCorpusCache:
+    """The index corpus is normalised once, and scores match plain cosine similarity."""
+
+    def _index(
+        self, dim: int = 16, n_positive: int = 30, n_negative: int = 120
+    ) -> Tuple[SentinelLocalIndex, np.random.Generator]:
+        """Build an index over seeded random embeddings with a mocked encoder."""
+        rng = np.random.default_rng(7)
+        model = MagicMock()
+        return (
+            SentinelLocalIndex(
+                sentence_model=model,
+                positive_embeddings=torch.tensor(
+                    rng.normal(size=(n_positive, dim)), dtype=torch.float32
+                ),
+                negative_embeddings=torch.tensor(
+                    rng.normal(size=(n_negative, dim)), dtype=torch.float32
+                ),
+            ),
+            rng,
+        )
+
+    def test_matches_semantic_search_cos_sim(self) -> None:
+        """``_search`` returns exactly what ``semantic_search`` with ``cos_sim`` does."""
+        from sentence_transformers.util import semantic_search
+
+        index, rng = self._index()
+        queries = rng.normal(size=(25, 16)).astype(np.float32)
+        for corpus in (index.positive_embeddings, index.negative_embeddings):
+            assert index._search(queries, corpus, 7) == semantic_search(
+                queries, corpus, top_k=7
+            )
+
+    def test_corpus_normalised_once_across_calls(self) -> None:
+        """After warm-up only the query chunks are normalised, not the corpus."""
+        import sentinel.sentinel_local_index as sli
+
+        index, rng = self._index()
+        texts = [f"t{i}" for i in range(10)]
+        embeddings = rng.normal(size=(10, 16)).astype(np.float32)
+        index.calculate_rare_class_affinity(texts, sample_embeddings=embeddings)
+        real = sli.normalize_embeddings
+        with patch.object(sli, "normalize_embeddings", side_effect=real) as spy:
+            first = index.calculate_rare_class_affinity(
+                texts, sample_embeddings=embeddings
+            )
+            second = index.calculate_rare_class_affinity(
+                texts, sample_embeddings=embeddings
+            )
+        # Two searches per call, each normalising only the query chunk.
+        assert spy.call_count == 4
+        assert all(call.args[0].shape[0] == 10 for call in spy.call_args_list)
+        assert first.observation_scores == second.observation_scores
+
+    def test_cache_follows_reassigned_and_mutated_embeddings(self) -> None:
+        """Reassigned or in-place mutated embeddings are re-normalised."""
+        from sentence_transformers.util import semantic_search
+
+        index, rng = self._index()
+        queries = rng.normal(size=(5, 16)).astype(np.float32)
+        index._search(queries, index.positive_embeddings, 3)
+
+        index.positive_embeddings = torch.tensor(
+            rng.normal(size=(30, 16)), dtype=torch.float32
+        )
+        assert index._search(queries, index.positive_embeddings, 3) == semantic_search(
+            queries, index.positive_embeddings, top_k=3
+        )
+
+        index.positive_embeddings.mul_(-1.0)
+        assert index._search(queries, index.positive_embeddings, 3) == semantic_search(
+            queries, index.positive_embeddings, top_k=3
+        )
+
+    def test_falls_back_for_inference_and_1d_corpora(self) -> None:
+        """Inference tensors and 1-D corpora score like plain ``semantic_search``."""
+        from sentence_transformers.util import semantic_search
+
+        index, rng = self._index()
+        queries = rng.normal(size=(5, 16)).astype(np.float32)
+        with torch.inference_mode():
+            corpus = torch.tensor(rng.normal(size=(30, 16)), dtype=torch.float32)
+        assert corpus.is_inference()
+        expected = semantic_search(queries, corpus, top_k=3)
+        assert index._search(queries, corpus, 3) == expected
+        assert index._search(queries, corpus, 3) == expected
+
+        vector = torch.tensor(rng.normal(size=16), dtype=torch.float32)
+        assert index._search(queries, vector, 1) == semantic_search(
+            queries, vector, top_k=1
+        )
+        assert not index.__dict__.get("_unit_embeddings_cache")
+
+    def test_inference_mode_warmup_caches_regular_tensor(self) -> None:
+        """A cache filled under inference mode still works with autograd-tracked queries."""
+        from sentence_transformers.util import semantic_search
+
+        index, rng = self._index()
+        queries = torch.tensor(rng.normal(size=(4, 16)), dtype=torch.float32)
+        with torch.inference_mode():
+            index._search(queries, index.positive_embeddings, 3)
+        (cached,) = index._unit_embeddings_cache.values()
+        assert cached[0] is index.positive_embeddings
+        assert not cached[2].is_inference()
+        tracked = queries.clone().requires_grad_()
+        assert index._search(tracked, index.positive_embeddings, 3) == semantic_search(
+            tracked, index.positive_embeddings, top_k=3
+        )
+
+    def test_autocast_bypasses_warm_cache(self) -> None:
+        """Under autocast scoring goes through plain ``semantic_search``."""
+        import sentinel.sentinel_local_index as sli
+
+        index, rng = self._index()
+        queries = rng.normal(size=(5, 16)).astype(np.float32)
+        index._search(queries, index.positive_embeddings, 3)
+        with patch.object(
+            sli.torch, "is_autocast_enabled", return_value=True
+        ), patch.object(
+            sli, "semantic_search", wraps=sli.semantic_search
+        ) as spy, patch.object(
+            index, "_unit_embeddings"
+        ) as unit:
+            index._search(queries, index.positive_embeddings, 3)
+        unit.assert_not_called()
+        assert "score_function" not in spy.call_args.kwargs
+
+    def test_large_corpus_is_not_cached(self) -> None:
+        """Corpora over one ``semantic_search`` chunk are normalised chunk by chunk."""
+        import sentinel.sentinel_local_index as sli
+
+        index, rng = self._index()
+        queries = rng.normal(size=(2, 16)).astype(np.float32)
+        with patch.object(sli, "_MAX_CACHED_CORPUS_ROWS", 10):
+            index._search(queries, index.positive_embeddings, 3)
+        assert not index.__dict__.get("_unit_embeddings_cache")
+
+    def test_replaced_corpus_released_when_replacement_bypasses_cache(self) -> None:
+        """Replacing a warm corpus with an uncacheable one drops its cached copy."""
+        index, rng = self._index()
+        queries = rng.normal(size=(2, 16)).astype(np.float32)
+        old_positive = index.positive_embeddings
+        index._search(queries, old_positive, 3)
+        index._search(queries, index.negative_embeddings, 3)
+        with torch.inference_mode():
+            index.positive_embeddings = torch.tensor(
+                rng.normal(size=(30, 16)), dtype=torch.float32
+            )
+        index._search(queries, index.positive_embeddings, 3)
+        sources = [v[0] for v in index._unit_embeddings_cache.values()]
+        assert len(sources) == 1 and sources[0] is index.negative_embeddings

@@ -19,12 +19,12 @@ This module provides the implementation of the SentinelLocalIndex class for loca
 """
 
 import logging
-from typing import Optional, List, Mapping, Any, Callable, Tuple
+from typing import Optional, List, Mapping, Any, Callable, Tuple, Union
 
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer
-from sentence_transformers.util import semantic_search
+from sentence_transformers.util import dot_score, normalize_embeddings, semantic_search
 
 from sentinel.score_formulae import calculate_contrastive_score, skewness, contrastive_components
 from sentinel.io.saved_index_config import SavedIndexConfig
@@ -228,6 +228,22 @@ def _take_rows(
         )
         return selected, None
     return selected, [corpus[i] for i in indices.tolist()]
+
+
+# semantic_search's default corpus_chunk_size.
+_MAX_CACHED_CORPUS_ROWS = 500_000
+
+
+def _cos_sim_with_unit_corpus(
+    query: torch.Tensor, unit_corpus: torch.Tensor
+) -> torch.Tensor:
+    """Cosine similarity against a corpus that is already L2-normalised.
+
+    Performs exactly the operations of ``sentence_transformers.util.cos_sim`` (normalise
+    both sides, then a matrix product), minus re-normalising the corpus, so the scores
+    are bit-for-bit the same.
+    """
+    return dot_score(normalize_embeddings(query), unit_corpus)
 
 
 class SentinelLocalIndex:
@@ -728,6 +744,73 @@ class SentinelLocalIndex:
             model_card=self.model_card,
         )
 
+    def _unit_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Return ``embeddings`` L2-normalised row-wise, computed once per tensor.
+
+        The index embeddings are fixed between calls, yet cosine similarity used to
+        re-normalise the whole corpus on every call. The cache is keyed on the tensor
+        object and its in-place version counter, so reassigning or mutating the
+        embeddings recomputes it.
+        """
+        cache = self.__dict__.setdefault("_unit_embeddings_cache", {})
+        key = id(embeddings)
+        cached = cache.get(key)
+        if (
+            cached is not None
+            and cached[0] is embeddings
+            and cached[1] == embeddings._version
+        ):
+            return cached[2]
+        # Cache a regular tensor even when first called under inference mode, so later
+        # autograd-tracked scoring can still use it.
+        with torch.inference_mode(False):
+            unit = normalize_embeddings(embeddings)
+        # Only the positive and negative embeddings are live; drop replaced tensors.
+        if key not in cache and len(cache) >= 2:
+            cache.clear()
+        # Hold on to the source tensor so its id cannot be reused by another tensor.
+        cache[key] = (embeddings, embeddings._version, unit)
+        return unit
+
+    def _search(
+        self,
+        sample_embeddings: Union[np.ndarray, torch.Tensor],
+        corpus_embeddings: Union[np.ndarray, torch.Tensor],
+        top_k: int,
+    ) -> List[List[dict]]:
+        """Run ``semantic_search`` with cosine similarity against an index corpus.
+
+        Falls back to plain ``semantic_search`` where a cached normalised corpus could
+        not match it: non-tensor or 1-D corpora, inference tensors (no version counter),
+        corpora that require grad, CUDA autocast (which changes the dtype ``cos_sim``
+        normalises in), and corpora larger than one ``semantic_search`` chunk, which it
+        normalises a chunk at a time instead of holding a full normalised copy. The
+        fallback also evicts cached copies of corpora that are no longer the index's
+        positive or negative embeddings.
+        """
+        if (
+            not isinstance(corpus_embeddings, torch.Tensor)
+            or corpus_embeddings.dim() != 2
+            or corpus_embeddings.shape[0] > _MAX_CACHED_CORPUS_ROWS
+            or corpus_embeddings.is_inference()
+            or corpus_embeddings.requires_grad
+            or torch.is_autocast_enabled()
+        ):
+            # Release cached copies of corpora that have since been replaced.
+            cache = self.__dict__.get("_unit_embeddings_cache", {})
+            live = (self.positive_embeddings, self.negative_embeddings)
+            for key in [
+                k for k, v in cache.items() if not any(v[0] is t for t in live)
+            ]:
+                cache.pop(key, None)
+            return semantic_search(sample_embeddings, corpus_embeddings, top_k=top_k)
+        return semantic_search(
+            sample_embeddings,
+            self._unit_embeddings(corpus_embeddings),
+            top_k=top_k,
+            score_function=_cos_sim_with_unit_corpus,
+        )
+
     def calculate_rare_class_affinity(
         self,
         text_samples: List[str],
@@ -810,17 +893,13 @@ class SentinelLocalIndex:
         additional_neighbors = 1 if prevent_exact_match else 0
 
         # Perform semantic search to find the most similar positive (rare class) examples
-        positive_matches = semantic_search(
-            sample_embeddings,
-            self.positive_embeddings,
-            top_k=top_k + additional_neighbors,
+        positive_matches = self._search(
+            sample_embeddings, self.positive_embeddings, top_k + additional_neighbors
         )
 
         # Perform semantic search to find the most similar negative (common class) examples
-        negative_matches = semantic_search(
-            sample_embeddings,
-            self.negative_embeddings,
-            top_k=top_k + additional_neighbors,
+        negative_matches = self._search(
+            sample_embeddings, self.negative_embeddings, top_k + additional_neighbors
         )
 
         observation_scores = {}
