@@ -784,7 +784,9 @@ class SentinelLocalIndex:
         not match it: non-tensor or 1-D corpora, inference tensors (no version counter),
         corpora that require grad, CUDA autocast (which changes the dtype ``cos_sim``
         normalises in), and corpora larger than one ``semantic_search`` chunk, which it
-        normalises a chunk at a time instead of holding a full normalised copy.
+        normalises a chunk at a time instead of holding a full normalised copy. The
+        fallback also evicts cached copies of corpora that are no longer the index's
+        positive or negative embeddings.
         """
         if (
             not isinstance(corpus_embeddings, torch.Tensor)
@@ -800,7 +802,7 @@ class SentinelLocalIndex:
             for key in [
                 k for k, v in cache.items() if not any(v[0] is t for t in live)
             ]:
-                del cache[key]
+                cache.pop(key, None)
             return semantic_search(sample_embeddings, corpus_embeddings, top_k=top_k)
         return semantic_search(
             sample_embeddings,
