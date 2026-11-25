@@ -940,6 +940,9 @@ class TestNormalizedCorpusCache:
         queries = torch.tensor(rng.normal(size=(4, 16)), dtype=torch.float32)
         with torch.inference_mode():
             index._search(queries, index.positive_embeddings, 3)
+        (cached,) = index._unit_embeddings_cache.values()
+        assert cached[0] is index.positive_embeddings
+        assert not cached[2].is_inference()
         tracked = queries.clone().requires_grad_()
         assert index._search(tracked, index.positive_embeddings, 3) == semantic_search(
             tracked, index.positive_embeddings, top_k=3
@@ -972,3 +975,18 @@ class TestNormalizedCorpusCache:
         with patch.object(sli, "_MAX_CACHED_CORPUS_ROWS", 10):
             index._search(queries, index.positive_embeddings, 3)
         assert not index.__dict__.get("_unit_embeddings_cache")
+
+    def test_replaced_corpus_released_when_replacement_bypasses_cache(self) -> None:
+        """Replacing a warm corpus with an uncacheable one drops its cached copy."""
+        index, rng = self._index()
+        queries = rng.normal(size=(2, 16)).astype(np.float32)
+        old_positive = index.positive_embeddings
+        index._search(queries, old_positive, 3)
+        index._search(queries, index.negative_embeddings, 3)
+        with torch.inference_mode():
+            index.positive_embeddings = torch.tensor(
+                rng.normal(size=(30, 16)), dtype=torch.float32
+            )
+        index._search(queries, index.positive_embeddings, 3)
+        sources = [v[0] for v in index._unit_embeddings_cache.values()]
+        assert len(sources) == 1 and sources[0] is index.negative_embeddings

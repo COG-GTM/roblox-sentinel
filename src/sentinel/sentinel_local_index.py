@@ -794,6 +794,13 @@ class SentinelLocalIndex:
             or corpus_embeddings.requires_grad
             or torch.is_autocast_enabled()
         ):
+            # Release cached copies of corpora that have since been replaced.
+            cache = self.__dict__.get("_unit_embeddings_cache", {})
+            live = (self.positive_embeddings, self.negative_embeddings)
+            for key in [
+                k for k, v in cache.items() if not any(v[0] is t for t in live)
+            ]:
+                del cache[key]
             return semantic_search(sample_embeddings, corpus_embeddings, top_k=top_k)
         return semantic_search(
             sample_embeddings,
