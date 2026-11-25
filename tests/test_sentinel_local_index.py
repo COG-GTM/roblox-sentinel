@@ -15,10 +15,12 @@
 """Tests for SentinelLocalIndex class."""
 
 import tempfile
+from typing import Tuple
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 import numpy as np
-from unittest.mock import MagicMock, patch
 
 from sentinel.sentinel_local_index import SentinelLocalIndex
 from sentinel.score_types import RareClassAffinityResult
@@ -840,7 +842,10 @@ class TestSubsample:
 class TestNormalizedCorpusCache:
     """The index corpus is normalised once, and scores match plain cosine similarity."""
 
-    def _index(self, dim=16, n_positive=30, n_negative=120):
+    def _index(
+        self, dim: int = 16, n_positive: int = 30, n_negative: int = 120
+    ) -> Tuple[SentinelLocalIndex, np.random.Generator]:
+        """Build an index over seeded random embeddings with a mocked encoder."""
         rng = np.random.default_rng(7)
         model = MagicMock()
         return (
@@ -856,7 +861,8 @@ class TestNormalizedCorpusCache:
             rng,
         )
 
-    def test_matches_semantic_search_cos_sim(self):
+    def test_matches_semantic_search_cos_sim(self) -> None:
+        """``_search`` returns exactly what ``semantic_search`` with ``cos_sim`` does."""
         from sentence_transformers.util import semantic_search
 
         index, rng = self._index()
@@ -866,7 +872,8 @@ class TestNormalizedCorpusCache:
                 queries, corpus, top_k=7
             )
 
-    def test_corpus_normalised_once_across_calls(self):
+    def test_corpus_normalised_once_across_calls(self) -> None:
+        """After warm-up only the query chunks are normalised, not the corpus."""
         import sentinel.sentinel_local_index as sli
 
         index, rng = self._index()
@@ -886,7 +893,8 @@ class TestNormalizedCorpusCache:
         assert all(call.args[0].shape[0] == 10 for call in spy.call_args_list)
         assert first.observation_scores == second.observation_scores
 
-    def test_cache_follows_reassigned_and_mutated_embeddings(self):
+    def test_cache_follows_reassigned_and_mutated_embeddings(self) -> None:
+        """Reassigned or in-place mutated embeddings are re-normalised."""
         from sentence_transformers.util import semantic_search
 
         index, rng = self._index()
