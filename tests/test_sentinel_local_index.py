@@ -904,3 +904,22 @@ class TestNormalizedCorpusCache:
         assert index._search(queries, index.positive_embeddings, 3) == semantic_search(
             queries, index.positive_embeddings, top_k=3
         )
+
+    def test_falls_back_for_inference_and_1d_corpora(self) -> None:
+        """Inference tensors and 1-D corpora score like plain ``semantic_search``."""
+        from sentence_transformers.util import semantic_search
+
+        index, rng = self._index()
+        queries = rng.normal(size=(5, 16)).astype(np.float32)
+        with torch.inference_mode():
+            corpus = torch.tensor(rng.normal(size=(30, 16)), dtype=torch.float32)
+        assert corpus.is_inference()
+        expected = semantic_search(queries, corpus, top_k=3)
+        assert index._search(queries, corpus, 3) == expected
+        assert index._search(queries, corpus, 3) == expected
+
+        vector = torch.tensor(rng.normal(size=16), dtype=torch.float32)
+        assert index._search(queries, vector, 1) == semantic_search(
+            queries, vector, top_k=1
+        )
+        assert not index.__dict__.get("_unit_embeddings_cache")

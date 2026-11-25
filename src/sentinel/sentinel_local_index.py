@@ -19,7 +19,7 @@ This module provides the implementation of the SentinelLocalIndex class for loca
 """
 
 import logging
-from typing import Optional, List, Mapping, Any, Callable, Tuple
+from typing import Optional, List, Mapping, Any, Callable, Tuple, Union
 
 import numpy as np
 import torch
@@ -766,10 +766,23 @@ class SentinelLocalIndex:
         return unit
 
     def _search(
-        self, sample_embeddings, corpus_embeddings, top_k: int
+        self,
+        sample_embeddings: Union[np.ndarray, torch.Tensor],
+        corpus_embeddings: Union[np.ndarray, torch.Tensor],
+        top_k: int,
     ) -> List[List[dict]]:
-        """Run ``semantic_search`` with cosine similarity against an index corpus."""
-        if not isinstance(corpus_embeddings, torch.Tensor):
+        """Run ``semantic_search`` with cosine similarity against an index corpus.
+
+        Falls back to plain ``semantic_search`` where a cached normalised corpus could
+        not match it: non-tensor or 1-D corpora, inference tensors (no version counter)
+        and CUDA autocast (which changes the dtype ``cos_sim`` normalises in).
+        """
+        if (
+            not isinstance(corpus_embeddings, torch.Tensor)
+            or corpus_embeddings.dim() != 2
+            or corpus_embeddings.is_inference()
+            or torch.is_autocast_enabled()
+        ):
             return semantic_search(sample_embeddings, corpus_embeddings, top_k=top_k)
         return semantic_search(
             sample_embeddings,
